@@ -1,10 +1,9 @@
-# CI build: every push to main and every PR compiles the plugin. Docs-only changes
+# CI build: every branch push and every PR compiles the plugin. Docs-only changes
 # skip the (heavy) CommonLibSSE-NG build.
 name: Build
 
 on:
-  push:
-    branches: [main]
+  push:            # every branch: a branch push is how you get a DLL to test
     paths-ignore: ["**/*.md"]
   pull_request:
     paths-ignore: ["**/*.md"]
