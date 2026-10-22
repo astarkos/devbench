@@ -411,19 +411,6 @@ namespace dvb::Capture
 				throw ToolError(400, "capture requires 'checkpointId'");
 			ValidatePathSegment("checkpointId", checkpointId);
 
-			// Preflight: bAllowScreenShot can disable vanilla capture outright.
-			const bool allowed = MainThread::RunAndWait([]() -> json {
-				if (auto* ini = RE::INISettingCollection::GetSingleton()) {
-					if (auto* s = ini->GetSetting("bAllowScreenShot:Display"))
-						return json(s->GetBool());
-				}
-				return json(true);  // absent → assume allowed rather than block on a guess
-			},
-				milliseconds(1000))
-			                         .get<bool>();
-			if (!allowed)
-				throw ToolError(409, "vanilla screenshots disabled (bAllowScreenShot:Display=0)");
-
 			std::vector<fs::path> dirs;
 			for (const auto& rel : g_captureScanDirs)
 				dirs.push_back(rel.empty() ? GameRoot() : GameRoot() / rel);
@@ -434,11 +421,15 @@ namespace dvb::Capture
 			for (auto& f : before)
 				beforeByPath[f.path.string()] = f;
 
+			// Check and queue in one round-trip, using RunAndWait's 5-second default budget.
 			const bool queued = MainThread::RunAndWait([]() -> json {
+				if (auto* ini = RE::INISettingCollection::GetSingleton()) {
+					if (auto* s = ini->GetSetting("bAllowScreenShot:Display"); s && !s->GetBool())
+						throw ToolError(409, "vanilla screenshots disabled (bAllowScreenShot:Display=0)");
+				}
 				auto* mc = RE::MenuControls::GetSingleton();
 				return json(mc && mc->QueueScreenshot());
-			},
-				milliseconds(1000))
+			})
 			                        .get<bool>();
 			if (!queued)
 				throw ToolError(409, "no ScreenshotHandler, or a shot is already queued");

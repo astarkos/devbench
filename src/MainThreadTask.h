@@ -1,11 +1,12 @@
 #pragma once
 
-#include "Json.h"
+#include "MainThread.h"
 
 #include <atomic>
 #include <chrono>
 #include <functional>
 #include <future>
+#include <mutex>
 #include <utility>
 
 namespace dvb::MainThread
@@ -35,13 +36,18 @@ namespace dvb::MainThread
 		{
 			// Enforce the deadline here too: the listener may be descheduled when it
 			// expires, and must not rely on waking first to cancel a stale mutation.
-			if (a_now >= _deadline) {
+			if (a_now >= _deadline)
 				Abandon();
+			auto expected = State::kQueued;
+			if (!_state.compare_exchange_strong(expected, State::kRunning)) {
+				// Running tasks own their result; repeated abandoned dispatches share one exception.
+				if (expected == State::kAbandoned) {
+					std::call_once(_abandonedResult, [this]() {
+						_promise.set_exception(std::make_exception_ptr(TaskTimeout(false, "main-thread task did not start; queued task abandoned")));
+					});
+				}
 				return;
 			}
-			auto expected = State::kQueued;
-			if (!_state.compare_exchange_strong(expected, State::kRunning))
-				return;
 			try {
 				_promise.set_value(_fn());
 			} catch (...) {
@@ -63,6 +69,7 @@ namespace dvb::MainThread
 		std::function<json()> _fn;
 		Clock::time_point     _deadline;
 		std::promise<json>    _promise;
+		std::once_flag        _abandonedResult;
 		std::atomic<State>    _state{ State::kQueued };
 	};
 }

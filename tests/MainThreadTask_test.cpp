@@ -18,7 +18,9 @@ TEST_CASE("abandoned main-thread mutation never executes when the queue drains")
 	CHECK(task.Abandon());
 	task.Run();
 	CHECK(mutations == 0);
-	CHECK(future.wait_for(0ms) == std::future_status::timeout);
+	CHECK(future.wait_for(0ms) == std::future_status::ready);
+	CHECK_NOTHROW(task.Run());
+	CHECK_THROWS_AS(future.get(), dvb::MainThread::TaskTimeout);
 }
 
 TEST_CASE("main-thread queue enforces its deadline before the listener wakes")
@@ -30,7 +32,15 @@ TEST_CASE("main-thread queue enforces its deadline before the listener wakes")
 	task.Run(deadline);  // No listener-side Abandon call before queue dispatch.
 	CHECK(mutations == 0);
 	CHECK(task.Abandon());
-	CHECK(future.wait_for(0ms) == std::future_status::timeout);
+	CHECK(future.wait_for(0ms) == std::future_status::ready);
+	CHECK_NOTHROW(task.Run(deadline));
+	try {
+		(void)future.get();
+		CHECK(false);
+	} catch (const dvb::MainThread::TaskTimeout& error) {
+		CHECK(error.code == 504);
+		CHECK(!error.started);
+	}
 }
 
 TEST_CASE("main-thread task preserves a completed result and executes once")
@@ -53,7 +63,7 @@ TEST_CASE("main-thread task propagates the callback exception through its future
 	CHECK(!task.Abandon());
 	bool expectedException = false;
 	try {
-		future.get();
+		(void)future.get();
 	} catch (const std::runtime_error& error) {
 		expectedException = std::string(error.what()) == "callback failure";
 	}
@@ -74,6 +84,8 @@ TEST_CASE("abandoning an already running main-thread task does not interrupt it"
 	std::jthread gameThread([&]() { task.Run(); });
 	started.wait();
 	CHECK(!task.Abandon());
+	CHECK_NOTHROW(task.Run());
+	CHECK_NOTHROW(task.Run(QueuedTask::Clock::now() + 2min));
 	CHECK(future.wait_for(0ms) == std::future_status::timeout);
 	finish.count_down();
 	gameThread.join();
@@ -95,7 +107,26 @@ TEST_CASE("concurrent abandonment and dispatch have exactly one winner")
 		const bool abandoned = task.Abandon();
 		gameThread.join();
 		CHECK(mutations == (abandoned ? 0 : 1));
-		if (!abandoned)
+		CHECK(future.wait_for(0ms) == std::future_status::ready);
+		if (abandoned)
+			CHECK_THROWS_AS(future.get(), dvb::MainThread::TaskTimeout);
+		else
 			CHECK(future.get() == 1);
 	}
+}
+
+TEST_CASE("concurrent dispatches of an abandoned task resolve only once")
+{
+	QueuedTask   task([]() -> dvb::json { throw std::runtime_error("must not execute"); }, QueuedTask::Clock::now());
+	auto         future = task.GetFuture();
+	std::latch   ready(2);
+	std::jthread first([&]() {
+		ready.arrive_and_wait();
+		task.Run();
+	});
+	ready.arrive_and_wait();
+	CHECK_NOTHROW(task.Run());
+	first.join();
+	CHECK(future.wait_for(0ms) == std::future_status::ready);
+	CHECK_THROWS_AS(future.get(), dvb::MainThread::TaskTimeout);
 }
